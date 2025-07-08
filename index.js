@@ -49,16 +49,76 @@ async function combineExcelData(newData, excelFilePath) {
     }
 }
 
+async function saveToExcel(validListings, excelFile) {
+    try {
+        // Format data for Excel
+        const excelData = validListings.map(item => ({
+            'Date': item.Date,
+            'Location': item.Location,
+            'URL': item.URL
+        }));
+
+        // Combine with existing data
+        const combinedData = await combineExcelData(excelData, excelFile);
+
+        // Create a new workbook and worksheet
+        const workbook = XLSX.utils.book_new();
+        const worksheet = XLSX.utils.json_to_sheet(combinedData);
+
+        // Add worksheet to workbook
+        XLSX.utils.book_append_sheet(workbook, worksheet, 'Valid Listings');
+
+        // Set column widths for better readability
+        const columnWidths = [
+            { wch: 25 },  // Date column
+            { wch: 40 },  // Location column
+            { wch: 75 }   // URL column (wide enough for long URLs)
+        ];
+        worksheet['!cols'] = columnWidths;
+
+        // Write to file
+        XLSX.writeFile(workbook, excelFile);
+        console.log(`📊 Exported ${combinedData.length} listings (${validListings.length} new + ${combinedData.length - validListings.length} existing) to Excel: ${excelFile}`);
+        return true;
+    } catch (error) {
+        console.error(`❌ Failed to create Excel file: ${error.message}`);
+        return false;
+    }
+}
+
 async function main() {
-    const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
+    const browser = await puppeteer.launch({ 
+        headless: true, 
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu'
+        ]
+    });
+    
     const page = await browser.newPage();
-    await page.goto(url1, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    
+    // Set user agent to avoid detection
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+    
+    // Add error handling for navigation
+    try {
+        await page.goto(url1, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    } catch (e) {
+        console.error('❌ Lỗi khi tải trang:', e.message);
+        await browser.close();
+        throw e;
+    }
 
     try {
-        await page.waitForSelector('a.crd7gu7', { timeout: 0 });
+        await page.waitForSelector('a.crd7gu7', { timeout: 30000 });
     } catch (e) {
-        await page.screenshot({ path: 'fail_page.png', fullPage: true });
-        console.error('❌ Không tìm thấy selector a.crd7gu7, đã lưu ảnh fail_page.png');
+        console.error('❌ Không tìm thấy selector a.crd7gu7');
+        await browser.close();
         throw e;
     }
 
@@ -66,7 +126,8 @@ async function main() {
     let consecutiveNoRecentPages = 0;
     let hasFoundRecentBefore = false;
 
-    while (true) {
+    try {
+        while (true) {
         console.log(`📄 Trang ${currentPage}`);
 
         const itemElements = await page.$$('a.crd7gu7');
@@ -161,9 +222,13 @@ async function main() {
         console.log(`🔍 Pagination container exists: ${paginationContainer !== null}`);
 
         if (paginationContainer) {
-            // Get the full HTML of pagination for debugging
-            const paginationHTML = await paginationContainer.evaluate(el => el.outerHTML);
-            console.log(`📝 Pagination HTML: ${paginationHTML.substring(0, 200)}...`);
+            try {
+                // Get the full HTML of pagination for debugging
+                const paginationHTML = await paginationContainer.evaluate(el => el.outerHTML);
+                console.log(`📝 Pagination HTML: ${paginationHTML.substring(0, 200)}...`);
+            } catch (evalError) {
+                console.log(`❌ Lỗi khi đọc pagination HTML: ${evalError.message}`);
+            }
         }
 
         // Try multiple approaches to find pagination
@@ -175,23 +240,27 @@ async function main() {
         console.log(`🔍 Tìm thấy ${paginationButtons.length} nút pagination`);
 
         for (const [index, button] of paginationButtons.entries()) {
-            const buttonInfo = await button.evaluate(btn => {
-                const icon = btn.querySelector('i');
-                const iconClasses = icon ? Array.from(icon.classList) : [];
-                return {
-                    hasRightIcon: iconClasses.includes('Paging_rightIcon__3p8MS'),
-                    hasDisabledIcon: iconClasses.includes('Paging_rightIconDisable__666wt') || iconClasses.includes('Paging_leftIconDisable__666wt'),
-                    disabled: btn.disabled,
-                    iconClasses: iconClasses
-                };
-            });
+            try {
+                const buttonInfo = await button.evaluate(btn => {
+                    const icon = btn.querySelector('i');
+                    const iconClasses = icon ? Array.from(icon.classList) : [];
+                    return {
+                        hasRightIcon: iconClasses.includes('Paging_rightIcon__3p8MS'),
+                        hasDisabledIcon: iconClasses.includes('Paging_rightIconDisable__666wt') || iconClasses.includes('Paging_leftIconDisable__666wt'),
+                        disabled: btn.disabled,
+                        iconClasses: iconClasses
+                    };
+                });
 
-            console.log(`🔘 Button ${index}: rightIcon=${buttonInfo.hasRightIcon}, disabled=${buttonInfo.disabled || buttonInfo.hasDisabledIcon}, classes=${buttonInfo.iconClasses.join(',')}`);
+                console.log(`🔘 Button ${index}: rightIcon=${buttonInfo.hasRightIcon}, disabled=${buttonInfo.disabled || buttonInfo.hasDisabledIcon}, classes=${buttonInfo.iconClasses.join(',')}`);
 
-            if (buttonInfo.hasRightIcon && !buttonInfo.hasDisabledIcon && !buttonInfo.disabled) {
-                nextButton = button;
-                console.log(`✅ Tìm thấy nút next hợp lệ tại index ${index}`);
-                break;
+                if (buttonInfo.hasRightIcon && !buttonInfo.hasDisabledIcon && !buttonInfo.disabled) {
+                    nextButton = button;
+                    console.log(`✅ Tìm thấy nút next hợp lệ tại index ${index}`);
+                    break;
+                }
+            } catch (buttonError) {
+                console.log(`❌ Lỗi khi kiểm tra button ${index}: ${buttonError.message}`);
             }
         }
 
@@ -204,19 +273,27 @@ async function main() {
                 const nextPageNumber = currentPage + 1;
 
                 for (const link of pageLinks) {
-                    const linkText = await link.evaluate(el => el.textContent.trim());
-                    console.log(`🔗 Tìm thấy link trang: "${linkText}"`);
+                    try {
+                        const linkText = await link.evaluate(el => el.textContent.trim());
+                        console.log(`🔗 Tìm thấy link trang: "${linkText}"`);
 
-                    if (linkText === nextPageNumber.toString()) {
-                        console.log(`➡️ Chuyển sang trang ${nextPageNumber} bằng link...`);
-                        await Promise.all([
-                            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
-                            link.click()
-                        ]);
-                        await delay(2000);
-                        currentPage++;
-                        foundNextPage = true;
-                        break;
+                        if (linkText === nextPageNumber.toString()) {
+                            console.log(`➡️ Chuyển sang trang ${nextPageNumber} bằng link...`);
+                            try {
+                                await Promise.all([
+                                    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+                                    link.click()
+                                ]);
+                                await delay(2000);
+                                currentPage++;
+                                foundNextPage = true;
+                                break;
+                            } catch (navError) {
+                                console.log(`❌ Lỗi navigation khi click link: ${navError.message}`);
+                            }
+                        }
+                    } catch (linkError) {
+                        console.log(`❌ Lỗi khi kiểm tra link: ${linkError.message}`);
                     }
                 }
             }
@@ -262,58 +339,53 @@ async function main() {
         // Execute next button click if found
         if (nextButton) {
             console.log('➡️ Chuyển sang trang tiếp theo bằng nút...');
-            await Promise.all([
-                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
-                nextButton.click()
-            ]);
-            await delay(2000);
-            currentPage++;
-            foundNextPage = true;
+            try {
+                await Promise.all([
+                    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+                    nextButton.click()
+                ]);
+                await delay(2000);
+                currentPage++;
+                foundNextPage = true;
+            } catch (navError) {
+                console.log(`❌ Lỗi navigation khi click button: ${navError.message}`);
+            }
         }
 
         // If no method worked, we're done
         if (!foundNextPage) {
             console.log('✅ Hết trang (đã thử tất cả phương pháp).');
-            await page.screenshot({ path: `no_next_page_${currentPage}.png`, fullPage: true });
             break;
         }
     }
 
-    // Save to Excel file
-    try {
-        // Format data for Excel
-        const excelData = validListings.map(item => ({
-            'Date': item.Date,
-            'Location': item.Location,
-            'URL': item.URL
-        }));
-
-        // Combine with existing data
-        const combinedData = await combineExcelData(excelData, excelFile);
-
-        // Create a new workbook and worksheet
-        const workbook = XLSX.utils.book_new();
-        const worksheet = XLSX.utils.json_to_sheet(combinedData);
-
-        // Add worksheet to workbook
-        XLSX.utils.book_append_sheet(workbook, worksheet, 'Valid Listings');
-
-        // Set column widths for better readability
-        const columnWidths = [
-            { wch: 25 },  // Date column
-            { wch: 40 },  // Location column
-            { wch: 75 }   // URL column (wide enough for long URLs)
-        ];
-        worksheet['!cols'] = columnWidths;
-
-        // Write to file
-        XLSX.writeFile(workbook, excelFile);
-        console.log(`📊 Exported ${combinedData.length} listings (${validListings.length} new + ${combinedData.length - validListings.length} existing) to Excel: ${excelFile}`);
-    } catch (error) {
-        console.error(`❌ Failed to create Excel file: ${error.message}`);
+    } catch (mainError) {
+        console.error(`💥 Lỗi trong quá trình crawl: ${mainError.message}`);
+        
+        // Auto-save data when error occurs
+        if (validListings.length > 0) {
+            console.log(`💾 Đang lưu ${validListings.length} tin đã thu thập được...`);
+            await saveToExcel(validListings, excelFile);
+        }
+        
+        await browser.close();
+        throw mainError;
     }
+
+    // Save to Excel file
+    await saveToExcel(validListings, excelFile);
 
     await browser.close();
 }
 
-main().catch(err => console.error('💥 Lỗi chính:', err));
+main()
+  .catch(async err => {
+    console.error('💥 Lỗi chính:', err.message);
+
+    if (validListings.length > 0) {
+        console.log(`💾 Cố gắng lưu lại ${validListings.length} tin đã crawl...`);
+        await saveToExcel(validListings, excelFile);
+    } else {
+        console.log('⚠️ Không có dữ liệu nào để lưu');
+    }
+  });
