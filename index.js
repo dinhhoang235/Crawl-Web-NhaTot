@@ -27,20 +27,26 @@ function formatDateForExcel(dateText) {
     return dateText;
 }
 
-async function combineExcelData(newData, filePath) {
-    let existingData = [];
-    if (fs.existsSync(filePath)) {
-        const workbook = XLSX.readFile(filePath);
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        existingData = XLSX.utils.sheet_to_json(sheet);
-        console.log(`📊 Tìm thấy ${existingData.length} tin đã có trong Excel`);
-    }
+async function combineExcelData(newData, excelFilePath) {
+    try {
+        let existingData = [];
+        if (fs.existsSync(excelFilePath)) {
+            const workbook = XLSX.readFile(excelFilePath);
+            const sheet = workbook.Sheets[workbook.SheetNames[0]];
+            existingData = XLSX.utils.sheet_to_json(sheet);
+            console.log(`📊 Tìm thấy ${existingData.length} tin đã có trong Excel`);
+        }
 
-    const existingURLs = new Set(existingData.map(d => d.URL));
-    const uniqueNew = newData.filter(d => !existingURLs.has(d.URL));
-    console.log(`📊 Từ ${newData.length} tin mới, ${uniqueNew.length} tin là duy nhất`);
-    
-    return [...existingData, ...uniqueNew];
+        const existingURLs = new Set(existingData.map(d => d.URL));
+        const uniqueNew = newData.filter(d => !existingURLs.has(d.URL));
+        console.log(`📊 Từ ${newData.length} tin mới, ${uniqueNew.length} tin là duy nhất`);
+        
+        return [...existingData, ...uniqueNew];
+    } catch (error) {
+        console.error(`❌ Error combining Excel data: ${error.message}`);
+        // If there's an error, just return the new data
+        return newData;
+    }
 }
 
 async function main() {
@@ -273,16 +279,38 @@ async function main() {
         }
     }
 
+    // Save to Excel file
     try {
-        const combinedData = await combineExcelData(validListings, excelFile);
+        // Format data for Excel
+        const excelData = validListings.map(item => ({
+            'Date': item.Date,
+            'Location': item.Location,
+            'URL': item.URL
+        }));
+
+        // Combine with existing data
+        const combinedData = await combineExcelData(excelData, excelFile);
+
+        // Create a new workbook and worksheet
         const workbook = XLSX.utils.book_new();
         const worksheet = XLSX.utils.json_to_sheet(combinedData);
-        worksheet['!cols'] = [{ wch: 25 }, { wch: 40 }, { wch: 75 }];
+
+        // Add worksheet to workbook
         XLSX.utils.book_append_sheet(workbook, worksheet, 'Valid Listings');
+
+        // Set column widths for better readability
+        const columnWidths = [
+            { wch: 25 },  // Date column
+            { wch: 40 },  // Location column
+            { wch: 75 }   // URL column (wide enough for long URLs)
+        ];
+        worksheet['!cols'] = columnWidths;
+
+        // Write to file
         XLSX.writeFile(workbook, excelFile);
-        console.log(`📊 Đã lưu ${combinedData.length} tin vào ${excelFile}`);
-    } catch (e) {
-        console.error(`❌ Lỗi ghi Excel: ${e.message}`);
+        console.log(`📊 Exported ${combinedData.length} listings (${validListings.length} new + ${combinedData.length - validListings.length} existing) to Excel: ${excelFile}`);
+    } catch (error) {
+        console.error(`❌ Failed to create Excel file: ${error.message}`);
     }
 
     await browser.close();
