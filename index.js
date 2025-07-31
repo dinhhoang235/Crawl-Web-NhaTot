@@ -115,9 +115,9 @@ async function main() {
     }
 
     try {
-        await page.waitForSelector('a.crd7gu7', { timeout: 30000 });
+        await page.waitForSelector('li.ard7gu7', { timeout: 30000 });
     } catch (e) {
-        console.error('❌ Không tìm thấy selector a.crd7gu7');
+        console.error('❌ Không tìm thấy selector li.ard7gu7');
         await browser.close();
         throw e;
     }
@@ -130,7 +130,7 @@ async function main() {
         while (true) {
         console.log(`📄 Trang ${currentPage}`);
 
-        const itemElements = await page.$$('a.crd7gu7');
+        const itemElements = await page.$$('li.ard7gu7');
         console.log(`🔍 Số tin trên trang: ${itemElements.length}`);
 
         let foundRecentPost = false;
@@ -138,31 +138,36 @@ async function main() {
 
         for (const [index, item] of itemElements.entries()) {
             try {
-                const link = await item.evaluate(el => el.href);
+                // Find the link within the list item
+                const linkElement = await item.$('a.cqzlgv9');
+                if (!linkElement) continue;
+                
+                const link = await linkElement.evaluate(el => el.href);
                 
                 // Skip if we already collected this URL in current session
                 if (collectedURLs.has(link)) {
                     console.log(`⏭️ Bỏ qua URL đã thu thập: ${link}`);
                     continue;
                 }
+
+                // Look for the date/time element - updated selector based on new HTML
+                const timeElement = await item.$('span.c1u6gyxh.tx5yyjc');
+                if (!timeElement) continue;
+
+                const dateRaw = await timeElement.evaluate(el => el.innerText.trim().toLowerCase());
                 
-                const wrapper = await item.evaluateHandle(el => el.closest('.webeqpz'));
-                if (!wrapper) continue;
-
-                const meta = await wrapper.evaluate(el => {
-                    const span = el.querySelector('span.c1u6gyxh.tx5yyjc');
-                    return span ? span.innerText.trim() : '';
-                });
-
-                if (!meta || !meta.includes('•')) continue;
-
-                const [locationRaw, dateRaw] = meta.split('•').map(t => t.trim().toLowerCase());
                 const isToday = dateRaw.includes('hôm nay') || dateRaw.includes('giờ') || dateRaw.includes('phút');
                 const isYesterday = dateRaw.includes('hôm qua');
 
                 if (!isToday && !isYesterday) continue;
 
                 foundRecentPost = true;
+
+                // Look for location - updated selector based on new HTML
+                const locationElement = await item.$('span.c1u6gyxh.t1u18gyr');
+                if (!locationElement) continue;
+                
+                const locationRaw = await locationElement.evaluate(el => el.innerText.trim().toLowerCase());
 
                 const desiredDistricts = [
                     'cầu giấy', 'đống đa', 'ba đình', 'bắc từ liêm', 'nam từ liêm',
@@ -171,13 +176,15 @@ async function main() {
                 const isDesired = desiredDistricts.some(d => locationRaw.includes(d));
                 if (!isDesired) continue;
 
-                const tinCountText = await wrapper.evaluate(el => {
-                    const span = el.querySelector('span.c1k1v7xu');
-                    return span ? span.innerText.trim() : '';
-                });
-
-                const tinMatch = tinCountText.match(/(\d+)/);
-                const tinCount = parseInt(tinMatch?.[1] || '0');
+                // Look for tin count - updated selector based on new HTML
+                const tinCountElement = await item.$('span.c1k1v7xu');
+                let tinCount = 0;
+                if (tinCountElement) {
+                    const tinCountText = await tinCountElement.evaluate(el => el.innerText.trim());
+                    const tinMatch = tinCountText.match(/(\d+)/);
+                    tinCount = parseInt(tinMatch?.[1] || '0');
+                }
+                
                 if (tinCount > 3) continue;
 
                 validListings.push({
@@ -244,17 +251,28 @@ async function main() {
                 const buttonInfo = await button.evaluate(btn => {
                     const icon = btn.querySelector('i');
                     const iconClasses = icon ? Array.from(icon.classList) : [];
+                    const isDisabled = btn.disabled || iconClasses.some(cls => 
+                        cls.includes('Disable') || cls.includes('disable')
+                    );
+                    const isRightArrow = iconClasses.some(cls => 
+                        cls.includes('rightIcon') || cls.includes('right')
+                    );
+                    const isLeftArrow = iconClasses.some(cls => 
+                        cls.includes('leftIcon') || cls.includes('left')
+                    );
+                    
                     return {
-                        hasRightIcon: iconClasses.includes('Paging_rightIcon__3p8MS'),
-                        hasDisabledIcon: iconClasses.includes('Paging_rightIconDisable__666wt') || iconClasses.includes('Paging_leftIconDisable__666wt'),
-                        disabled: btn.disabled,
+                        hasRightIcon: isRightArrow,
+                        hasLeftIcon: isLeftArrow,
+                        isDisabled: isDisabled,
                         iconClasses: iconClasses
                     };
                 });
 
-                console.log(`🔘 Button ${index}: rightIcon=${buttonInfo.hasRightIcon}, disabled=${buttonInfo.disabled || buttonInfo.hasDisabledIcon}, classes=${buttonInfo.iconClasses.join(',')}`);
+                console.log(`🔘 Button ${index}: rightIcon=${buttonInfo.hasRightIcon}, leftIcon=${buttonInfo.hasLeftIcon}, disabled=${buttonInfo.isDisabled}, classes=${buttonInfo.iconClasses.join(',')}`);
 
-                if (buttonInfo.hasRightIcon && !buttonInfo.hasDisabledIcon && !buttonInfo.disabled) {
+                // Look for the right arrow button that is not disabled
+                if (buttonInfo.hasRightIcon && !buttonInfo.isDisabled) {
                     nextButton = button;
                     console.log(`✅ Tìm thấy nút next hợp lệ tại index ${index}`);
                     break;
@@ -274,10 +292,13 @@ async function main() {
 
                 for (const link of pageLinks) {
                     try {
-                        const linkText = await link.evaluate(el => el.textContent.trim());
-                        console.log(`🔗 Tìm thấy link trang: "${linkText}"`);
+                        const linkInfo = await link.evaluate(el => ({
+                            text: el.textContent.trim(),
+                            href: el.href
+                        }));
+                        console.log(`🔗 Tìm thấy link trang: "${linkInfo.text}" - ${linkInfo.href}`);
 
-                        if (linkText === nextPageNumber.toString()) {
+                        if (linkInfo.text === nextPageNumber.toString()) {
                             console.log(`➡️ Chuyển sang trang ${nextPageNumber} bằng link...`);
                             try {
                                 await Promise.all([
@@ -290,6 +311,17 @@ async function main() {
                                 break;
                             } catch (navError) {
                                 console.log(`❌ Lỗi navigation khi click link: ${navError.message}`);
+                                // Try direct navigation as fallback
+                                try {
+                                    await page.goto(linkInfo.href, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                                    await delay(2000);
+                                    currentPage++;
+                                    foundNextPage = true;
+                                    console.log(`✅ Fallback navigation thành công`);
+                                    break;
+                                } catch (fallbackError) {
+                                    console.log(`❌ Fallback navigation cũng thất bại: ${fallbackError.message}`);
+                                }
                             }
                         }
                     } catch (linkError) {
@@ -323,7 +355,7 @@ async function main() {
                 await delay(2000);
 
                 // Check if the page actually changed by looking for listings
-                const newItemElements = await page.$$('a.crd7gu7');
+                const newItemElements = await page.$$('li.ard7gu7');
                 if (newItemElements.length > 0) {
                     console.log(`✅ Thành công chuyển đến trang ${nextPageNumber}`);
                     currentPage++;
