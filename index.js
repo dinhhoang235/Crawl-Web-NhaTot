@@ -171,7 +171,7 @@ async function main() {
 
                 const desiredDistricts = [
                     'cầu giấy', 'đống đa', 'ba đình', 'bắc từ liêm', 'nam từ liêm',
-                    'tây hồ', 'hoàng mai', 'hai bà trưng', 'thanh xuân', 'hà đông',
+                    'tây hồ', 'hoàng mai', 'hai bà trưng', 'thanh xuân', 'hà đông', 'hoàn kiếm'
                 ];
                 const isDesired = desiredDistricts.some(d => locationRaw.includes(d));
                 if (!isDesired) continue;
