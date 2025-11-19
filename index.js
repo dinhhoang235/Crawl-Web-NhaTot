@@ -1,11 +1,8 @@
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const { connect } = require('puppeteer-real-browser');
 const { url1 } = require('./urls');
 const fs = require('fs');
 const path = require('path');
 const XLSX = require('xlsx');
-
-puppeteer.use(StealthPlugin());
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const validListings = [];
@@ -85,39 +82,107 @@ async function saveToExcel(validListings, excelFile) {
         return false;
     }
 }
+// ...existing code...
 
 async function main() {
-    const browser = await puppeteer.launch({ 
-        headless: true, 
+    console.log('🚀 Khởi động browser với chế độ bypass Cloudflare...');
+    
+    const { browser, page } = await connect({
+        headless: false,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu'
-        ]
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process'
+        ],
+        customConfig: {},
+        turnstile: true,
+        connectOption: {
+            defaultViewport: null
+        },
+        disableXvfb: false,
+        ignoreAllFlags: false
     });
     
-    const page = await browser.newPage();
+    console.log('✅ Browser đã khởi động');
     
-    // Set user agent to avoid detection
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+    // 🔧 TỐI ƯU 1: Chờ page load hoàn toàn trước Cloudflare check
+    console.log('🌐 Đang truy cập trang web...');
+    let retries = 3;
+    let pageLoaded = false;
     
-    // Add error handling for navigation
-    try {
-        await page.goto(url1, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    } catch (e) {
-        console.error('❌ Lỗi khi tải trang:', e.message);
-        await browser.close();
-        throw e;
+    while (retries > 0 && !pageLoaded) {
+        try {
+            await page.goto(url1, { 
+                waitUntil: 'networkidle2',
+                timeout: 90000 
+            });
+            
+            // 🔧 TỐI ƯU 2: Chờ lâu hơn và check nhiều lần
+            console.log('⏳ Đợi Cloudflare check...');
+            let cloudflareDetected = true;
+            let waitAttempts = 0;
+            
+            while (cloudflareDetected && waitAttempts < 4) {
+                await delay(5000 + waitAttempts * 2000); // 5s, 7s, 9s, 11s
+                waitAttempts++;
+                
+                const bodyText = await page.evaluate(() => document.body.innerText);
+                cloudflareDetected = bodyText.includes('Checking your browser') || 
+                                   bodyText.includes('Just a moment') || 
+                                   bodyText.includes('bỏ chặn') ||
+                                   bodyText.includes('Enable JavaScript');
+                
+                if (cloudflareDetected) {
+                    console.log(`🔄 Cloudflare đang check (lần ${waitAttempts})...`);
+                } else {
+                    console.log('✅ Cloudflare check xong!');
+                }
+            }
+            
+            // Final check - nếu vẫn bị chặn thì throw error
+            const finalBodyText = await page.evaluate(() => document.body.innerText);
+            if (finalBodyText.includes('Checking your browser') || 
+                finalBodyText.includes('bỏ chặn')) {
+                throw new Error('Cloudflare vẫn chặn sau 4 lần check');
+            }
+            
+            pageLoaded = true;
+            console.log('✅ Trang đã load thành công!');
+            
+        } catch (e) {
+            retries--;
+            console.error(`❌ Lỗi khi tải trang (còn ${retries} lần thử): ${e.message}`);
+            if (retries === 0) {
+                await browser.close();
+                throw e;
+            }
+            await delay(5000);
+        }
     }
 
     try {
-        await page.waitForSelector('li.ard7gu7', { timeout: 30000 });
+        // 🔧 TỐI ƯU 3: Thêm fallback selector
+        let listSelector = 'li.ard7gu7';
+        let listElements = await page.$$(listSelector);
+        
+        if (listElements.length === 0) {
+            console.log('⚠️ Selector mặc định không tìm thấy, thử fallback...');
+            const fallbackSelectors = ['li[class*="ard7gu7"]', 'li[class*="listing"]', 'li'];
+            
+            for (const selector of fallbackSelectors) {
+                listElements = await page.$$(selector);
+                if (listElements.length > 0) {
+                    listSelector = selector;
+                    console.log(`✅ Tìm thấy ${listElements.length} items với selector: ${selector}`);
+                    break;
+                }
+            }
+        }
+        
+        await page.waitForSelector(listSelector, { timeout: 30000 });
     } catch (e) {
-        console.error('❌ Không tìm thấy selector li.ard7gu7');
+        console.error('❌ Không tìm thấy selector listings');
         await browser.close();
         throw e;
     }
@@ -128,215 +193,120 @@ async function main() {
 
     try {
         while (true) {
-        console.log(`📄 Trang ${currentPage}`);
+            console.log(`📄 Trang ${currentPage}`);
 
-        const itemElements = await page.$$('li.ard7gu7');
-        console.log(`🔍 Số tin trên trang: ${itemElements.length}`);
+            const itemElements = await page.$$('li.ard7gu7');
+            console.log(`🔍 Số tin trên trang: ${itemElements.length}`);
 
-        let foundRecentPost = false;
-        let validInThisPage = 0;
+            let foundRecentPost = false;
+            let validInThisPage = 0;
 
-        for (const [index, item] of itemElements.entries()) {
-            try {
-                // Find the link within the list item
-                const linkElement = await item.$('a.cqzlgv9');
-                if (!linkElement) continue;
-                
-                const link = await linkElement.evaluate(el => el.href);
-                
-                // Skip if we already collected this URL in current session
-                if (collectedURLs.has(link)) {
-                    console.log(`⏭️ Bỏ qua URL đã thu thập: ${link}`);
-                    continue;
-                }
-
-                // Look for the date/time element - updated selector based on new HTML
-                const timeElement = await item.$('span.c1u6gyxh.tx5yyjc');
-                if (!timeElement) continue;
-
-                const dateRaw = await timeElement.evaluate(el => el.innerText.trim().toLowerCase());
-                
-                const isToday = dateRaw.includes('hôm nay') || dateRaw.includes('giờ') || dateRaw.includes('phút');
-                const isYesterday = dateRaw.includes('hôm qua');
-
-                if (!isToday && !isYesterday) continue;
-
-                foundRecentPost = true;
-
-                // Look for location - updated selector based on new HTML
-                const locationElement = await item.$('span.c1u6gyxh.t1u18gyr');
-                if (!locationElement) continue;
-                
-                const locationRaw = await locationElement.evaluate(el => el.innerText.trim().toLowerCase());
-
-                const desiredDistricts = [
-                    'cầu giấy', 'đống đa', 'ba đình', 'bắc từ liêm', 'nam từ liêm',
-                    'tây hồ', 'hoàng mai', 'hai bà trưng', 'thanh xuân', 'hà đông', 'hoàn kiếm'
-                ];
-                const isDesired = desiredDistricts.some(d => locationRaw.includes(d));
-                if (!isDesired) continue;
-
-                // Look for tin count - updated selector based on new HTML
-                const tinCountElement = await item.$('span.c1k1v7xu');
-                let tinCount = 0;
-                if (tinCountElement) {
-                    const tinCountText = await tinCountElement.evaluate(el => el.innerText.trim());
-                    const tinMatch = tinCountText.match(/(\d+)/);
-                    tinCount = parseInt(tinMatch?.[1] || '0');
-                }
-                
-                if (tinCount > 3) continue;
-
-                validListings.push({
-                    Date: formatDateForExcel(dateRaw),
-                    Location: locationRaw,
-                    URL: link
-                });
-
-                // Add to collected URLs set
-                collectedURLs.add(link);
-                validInThisPage++;
-
-                console.log(`✅ Hợp lệ: ${locationRaw} - ${dateRaw}`);
-
-            } catch (err) {
-                console.log(`🔥 Lỗi item ${index}: ${err.message}`);
-            }
-        }
-
-        // Log page completion summary
-        console.log(`📊 Kết thúc trang ${currentPage}: Tìm thấy ${validInThisPage} tin hợp lệ | Tổng cộng: ${validListings.length} tin`);
-
-        if (foundRecentPost) {
-            consecutiveNoRecentPages = 0;
-            hasFoundRecentBefore = true;
-        } else {
-            if (hasFoundRecentBefore) {
-                consecutiveNoRecentPages++;
-                console.log(`⚠️ Không có bài mới: ${consecutiveNoRecentPages} trang liên tiếp.`);
-                if (consecutiveNoRecentPages >= 15) {
-                    console.log('🛑 Dừng lại sau 15 trang không có bài mới.');
-                    break;
-                }
-            }
-        }
-
-        // Wait for pagination to load and try multiple selectors
-        await delay(2000);
-
-        // Debug: Check if pagination container exists
-        const paginationContainer = await page.$('.Paging_Paging__oREgP');
-        console.log(`🔍 Pagination container exists: ${paginationContainer !== null}`);
-
-        if (paginationContainer) {
-            try {
-                // Get the full HTML of pagination for debugging
-                const paginationHTML = await paginationContainer.evaluate(el => el.outerHTML);
-                console.log(`📝 Pagination HTML: ${paginationHTML.substring(0, 200)}...`);
-            } catch (evalError) {
-                console.log(`❌ Lỗi khi đọc pagination HTML: ${evalError.message}`);
-            }
-        }
-
-        // Try multiple approaches to find pagination
-        let nextButton = null;
-        let foundNextPage = false;
-
-        // Approach 1: Look for pagination buttons
-        const paginationButtons = await page.$$('button.Paging_redirectPageBtn__KvsqJ');
-        console.log(`🔍 Tìm thấy ${paginationButtons.length} nút pagination`);
-
-        for (const [index, button] of paginationButtons.entries()) {
-            try {
-                const buttonInfo = await button.evaluate(btn => {
-                    const icon = btn.querySelector('i');
-                    const iconClasses = icon ? Array.from(icon.classList) : [];
-                    const isDisabled = btn.disabled || iconClasses.some(cls => 
-                        cls.includes('Disable') || cls.includes('disable')
-                    );
-                    const isRightArrow = iconClasses.some(cls => 
-                        cls.includes('rightIcon') || cls.includes('right')
-                    );
-                    const isLeftArrow = iconClasses.some(cls => 
-                        cls.includes('leftIcon') || cls.includes('left')
-                    );
-                    
-                    return {
-                        hasRightIcon: isRightArrow,
-                        hasLeftIcon: isLeftArrow,
-                        isDisabled: isDisabled,
-                        iconClasses: iconClasses
-                    };
-                });
-
-                console.log(`🔘 Button ${index}: rightIcon=${buttonInfo.hasRightIcon}, leftIcon=${buttonInfo.hasLeftIcon}, disabled=${buttonInfo.isDisabled}, classes=${buttonInfo.iconClasses.join(',')}`);
-
-                // Look for the right arrow button that is not disabled
-                if (buttonInfo.hasRightIcon && !buttonInfo.isDisabled) {
-                    nextButton = button;
-                    console.log(`✅ Tìm thấy nút next hợp lệ tại index ${index}`);
-                    break;
-                }
-            } catch (buttonError) {
-                console.log(`❌ Lỗi khi kiểm tra button ${index}: ${buttonError.message}`);
-            }
-        }
-
-        // Approach 2: Look for numbered page links
-        if (!nextButton) {
-            const pageLinks = await page.$$('div.Paging_pagingItem__Y3r2u a');
-            console.log(`🔍 Tìm thấy ${pageLinks.length} link trang số`);
-
-            if (pageLinks.length > 0) {
-                const nextPageNumber = currentPage + 1;
-
-                for (const link of pageLinks) {
+            for (const [index, item] of itemElements.entries()) {
+                try {
+                    // 🔧 TỐI ƯU 4: Thêm error handling cho mỗi field
+                    let link = null;
                     try {
-                        const linkInfo = await link.evaluate(el => ({
-                            text: el.textContent.trim(),
-                            href: el.href
-                        }));
-                        console.log(`🔗 Tìm thấy link trang: "${linkInfo.text}" - ${linkInfo.href}`);
-
-                        if (linkInfo.text === nextPageNumber.toString()) {
-                            console.log(`➡️ Chuyển sang trang ${nextPageNumber} bằng link...`);
-                            try {
-                                await Promise.all([
-                                    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
-                                    link.click()
-                                ]);
-                                await delay(2000);
-                                currentPage++;
-                                foundNextPage = true;
-                                break;
-                            } catch (navError) {
-                                console.log(`❌ Lỗi navigation khi click link: ${navError.message}`);
-                                // Try direct navigation as fallback
-                                try {
-                                    await page.goto(linkInfo.href, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                                    await delay(2000);
-                                    currentPage++;
-                                    foundNextPage = true;
-                                    console.log(`✅ Fallback navigation thành công`);
-                                    break;
-                                } catch (fallbackError) {
-                                    console.log(`❌ Fallback navigation cũng thất bại: ${fallbackError.message}`);
-                                }
-                            }
+                        const linkElement = await item.$('a.cqzlgv9');
+                        if (linkElement) {
+                            link = await linkElement.evaluate(el => el.href);
                         }
-                    } catch (linkError) {
-                        console.log(`❌ Lỗi khi kiểm tra link: ${linkError.message}`);
+                    } catch (e) {
+                        console.log(`  ⚠️ Không tìm được link item ${index}`);
+                        continue;
+                    }
+                    
+                    if (!link || collectedURLs.has(link)) continue;
+
+                    // Get date
+                    let dateRaw = null;
+                    try {
+                        const timeElement = await item.$('span.c1u6gyxh.tx5yyjc');
+                        if (timeElement) {
+                            dateRaw = await timeElement.evaluate(el => el.innerText.trim().toLowerCase());
+                        }
+                    } catch (e) {
+                        console.log(`  ⚠️ Không tìm được date item ${index}`);
+                    }
+                    
+                    if (!dateRaw) continue;
+
+                    const isToday = dateRaw.includes('hôm nay') || dateRaw.includes('giờ') || dateRaw.includes('phút');
+                    const isYesterday = dateRaw.includes('hôm qua');
+
+                    if (!isToday && !isYesterday) continue;
+                    foundRecentPost = true;
+
+                    // Get location
+                    let locationRaw = null;
+                    try {
+                        const locationElement = await item.$('span.c1u6gyxh.t1u18gyr');
+                        if (locationElement) {
+                            locationRaw = await locationElement.evaluate(el => el.innerText.trim().toLowerCase());
+                        }
+                    } catch (e) {
+                        console.log(`  ⚠️ Không tìm được location item ${index}`);
+                    }
+                    
+                    if (!locationRaw) continue;
+
+                    const desiredDistricts = [
+                        'cầu giấy', 'đống đa', 'ba đình', 'bắc từ liêm', 'nam từ liêm',
+                        'tây hồ', 'hoàng mai', 'hai bà trưng', 'thanh xuân', 'hà đông', 'hoàn kiếm'
+                    ];
+                    const isDesired = desiredDistricts.some(d => locationRaw.includes(d));
+                    if (!isDesired) continue;
+
+                    // Get tin count
+                    let tinCount = 0;
+                    try {
+                        const tinCountElement = await item.$('span.c1k1v7xu');
+                        if (tinCountElement) {
+                            const tinCountText = await tinCountElement.evaluate(el => el.innerText.trim());
+                            const tinMatch = tinCountText.match(/(\d+)/);
+                            tinCount = parseInt(tinMatch?.[1] || '0');
+                        }
+                    } catch (e) {
+                        // Ignore tin count error
+                    }
+                    
+                    if (tinCount > 3) continue;
+
+                    validListings.push({
+                        Date: formatDateForExcel(dateRaw),
+                        Location: locationRaw,
+                        URL: link
+                    });
+
+                    collectedURLs.add(link);
+                    validInThisPage++;
+
+                    console.log(`✅ Hợp lệ: ${locationRaw} - ${dateRaw}`);
+
+                } catch (err) {
+                    console.log(`🔥 Lỗi item ${index}: ${err.message}`);
+                }
+            }
+
+            console.log(`📊 Trang ${currentPage}: ${validInThisPage} tin hợp lệ | Tổng: ${validListings.length}`);
+
+            if (foundRecentPost) {
+                consecutiveNoRecentPages = 0;
+                hasFoundRecentBefore = true;
+            } else {
+                if (hasFoundRecentBefore) {
+                    consecutiveNoRecentPages++;
+                    console.log(`⚠️ Không có bài mới: ${consecutiveNoRecentPages}/15 trang.`);
+                    if (consecutiveNoRecentPages >= 15) {
+                        console.log('🛑 Dừng crawl.');
+                        break;
                     }
                 }
             }
-        }
 
-        // Approach 3: Try direct URL navigation if we know the pattern
-        if (!nextButton && !foundNextPage) {
+            // 🔧 TỐI ƯU 5: Simplified pagination - chỉ dùng cách đơn giản nhất
+            await delay(2000);
+            
             const currentUrl = page.url();
-            console.log(`🌐 Current URL: ${currentUrl}`);
-
-            // Check if we can construct next page URL
             const nextPageNumber = currentPage + 1;
             let nextPageUrl = null;
 
@@ -348,55 +318,33 @@ async function main() {
                 nextPageUrl = `${currentUrl}?page=${nextPageNumber}`;
             }
 
-            console.log(`🔗 Thử chuyển đến URL: ${nextPageUrl}`);
-
             try {
-                await page.goto(nextPageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                await delay(2000);
-
-                // Check if the page actually changed by looking for listings
-                const newItemElements = await page.$$('li.ard7gu7');
-                if (newItemElements.length > 0) {
-                    console.log(`✅ Thành công chuyển đến trang ${nextPageNumber}`);
-                    currentPage++;
-                    foundNextPage = true;
-                } else {
-                    console.log(`❌ Trang ${nextPageNumber} không có tin đăng - có thể đã hết trang`);
+                await page.goto(nextPageUrl, { 
+                    waitUntil: 'domcontentloaded', 
+                    timeout: 60000 
+                });
+                
+                // Check if page có listings
+                const newItems = await page.$$('li.ard7gu7');
+                if (newItems.length === 0) {
+                    console.log('✅ Hết trang.');
+                    break;
                 }
-            } catch (error) {
-                console.log(`❌ Lỗi khi chuyển đến trang ${nextPageNumber}: ${error.message}`);
-            }
-        }
-
-        // Execute next button click if found
-        if (nextButton) {
-            console.log('➡️ Chuyển sang trang tiếp theo bằng nút...');
-            try {
-                await Promise.all([
-                    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }),
-                    nextButton.click()
-                ]);
-                await delay(2000);
+                
                 currentPage++;
-                foundNextPage = true;
-            } catch (navError) {
-                console.log(`❌ Lỗi navigation khi click button: ${navError.message}`);
+                await delay(1000); // Delay giữa các trang
+                
+            } catch (error) {
+                console.log(`❌ Không thể chuyển trang: ${error.message}`);
+                break;
             }
         }
-
-        // If no method worked, we're done
-        if (!foundNextPage) {
-            console.log('✅ Hết trang (đã thử tất cả phương pháp).');
-            break;
-        }
-    }
 
     } catch (mainError) {
-        console.error(`💥 Lỗi trong quá trình crawl: ${mainError.message}`);
+        console.error(`💥 Lỗi crawl: ${mainError.message}`);
         
-        // Auto-save data when error occurs
         if (validListings.length > 0) {
-            console.log(`💾 Đang lưu ${validListings.length} tin đã thu thập được...`);
+            console.log(`💾 Lưu ${validListings.length} tin...`);
             await saveToExcel(validListings, excelFile);
         }
         
@@ -415,9 +363,7 @@ main()
     console.error('💥 Lỗi chính:', err.message);
 
     if (validListings.length > 0) {
-        console.log(`💾 Cố gắng lưu lại ${validListings.length} tin đã crawl...`);
+        console.log(`💾 Lưu ${validListings.length} tin...`);
         await saveToExcel(validListings, excelFile);
-    } else {
-        console.log('⚠️ Không có dữ liệu nào để lưu');
     }
   });
